@@ -3,6 +3,7 @@ package pl.example.gpxgenerator.gpx
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Environment
 import androidx.core.content.FileProvider
 import pl.example.gpxgenerator.generator.RouteCandidate
 import java.io.File
@@ -40,7 +41,6 @@ object GpxExporter {
     </rtept>
         """.trimIndent()
 
-        // Generowanie dokładnego śladu <trkpt> po geometrii dróg
         val trkptXml = candidate.roadPoints.joinToString("\n") { p ->
             "      <trkpt lat=\"${p.latitude}\" lon=\"${p.longitude}\" />"
         }
@@ -81,6 +81,15 @@ $trkptXml
         val authority = "${context.packageName}.fileprovider"
         val uri = FileProvider.getUriForFile(context, authority, file)
         return Pair(file, uri)
+    }
+
+    fun saveGpxToPublicDownloads(context: Context, candidate: RouteCandidate, fileName: String = "trasa_motocyklowa.gpx"): File {
+        val gpxContent = exportToGpxString(candidate)
+        val baseDir = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: context.cacheDir
+        val dir = File(baseDir, "Trasy_GPX").apply { mkdirs() }
+        val file = File(dir, fileName)
+        file.writeText(gpxContent, Charsets.UTF_8)
+        return file
     }
 
     fun shareGpxFile(context: Context, uri: Uri, title: String = "Udostępnij trasę GPX") {

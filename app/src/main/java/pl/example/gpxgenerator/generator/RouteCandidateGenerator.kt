@@ -1,10 +1,12 @@
 package pl.example.gpxgenerator.generator
 
+import android.content.Context
 import pl.example.gpxgenerator.model.GeoPoint
 import pl.example.gpxgenerator.model.OsmRoadGraph
 import pl.example.gpxgenerator.model.RoutePreferences
 import pl.example.gpxgenerator.network.OverpassClient
 import java.io.IOException
+import kotlin.math.max
 
 data class RouteCandidate(
     val start: GeoPoint,
@@ -12,39 +14,76 @@ data class RouteCandidate(
     val roadPoints: List<GeoPoint>,
     val preferences: RoutePreferences,
     val estimatedDistanceKm: Double,
-    val trackPointCount: Int
+    val trackPointCount: Int,
+    val fromCache: Boolean = false,
+    val executionTimeMs: Long = 0L,
+    val fetchTimeMs: Long = 0L,
+    val routerTimeMs: Long = 0L,
+    val payloadSizeBytes: Long = 0L,
+    val ramUsedMb: Double = 0.0
 )
 
 object RouteCandidateGenerator {
 
-    /**
-     * Główny algorytm trasowania po realnej siatce dróg z OSM:
-     * 1. Pobiera drogi w promieniu/bounding boxie z Overpass API.
-     * 2. Buduje graf w pamięci z wyważonymi kosztami dróg (omijanie A/S/DK, priorytet dróg lokalnych).
-     * 3. Wyszukuje najbliższe węzły dróg dla startu i mety.
-     * 4. Uruchamia algorytm A* Pathfinder wyznaczający rzeczywisty ślad drogowo-geograficzny.
-     */
     fun generateRealRoadRoute(
+        context: Context,
         start: GeoPoint,
         end: GeoPoint,
-        preferences: RoutePreferences
+        preferences: RoutePreferences,
+        onProgress: (String) -> Unit = {}
     ): RouteCandidate {
-        val overpassData = OverpassClient.fetchRoadsInBoundingBox(start, end)
-        require(overpassData.ways.isNotEmpty()) {
-            "Nie znaleziono dróg w wskazanym obszarze. Sprawdź punkty startu i mety."
+        val runtime = Runtime.getRuntime()
+        val ramBefore = (runtime.totalMemory() - runtime.freeMemory()) / (1024.0 * 1024.0)
+
+        val t0 = System.currentTimeMillis()
+        val overpassData = OverpassClient.fetchRoadsInBoundingBox(context, start, end, onProgress)
+        val t1 = System.currentTimeMillis()
+
+        if (overpassData.ways.isEmpty()) {
+            throw IOException("Nie znaleziono dróg w wskazanym obszarze. Sprawdź punkty startu i mety.")
         }
 
+        onProgress("🏗️ Budowanie grafu dróg (${overpassData.nodes.size} węzłów, ${overpassData.ways.size} odcinków)...")
         val graph = OsmRoadGraph.build(overpassData, preferences)
 
-        val startNodeId = graph.findNearestNode(start)
-            ?: throw IOException("Nie udało się zlokalizować najbliższej drogi dla punktu startowego.")
-        val endNodeId = graph.findNearestNode(end)
-            ?: throw IOException("Nie udało się zlokalizować najbliższej drogi dla punktu docelowego.")
+        val startCandidates = graph.findNearestNodeCandidates(start, 5)
+        val endCandidates = graph.findNearestNodeCandidates(end, 5)
 
-        val pathResult = AStarRouter.findPath(graph, startNodeId, endNodeId)
-            ?: throw IOException("Nie udało się wyznaczyć trasy bocznej po drogach utwardzonych w tym obszarze. Spróbuj zmienić punkty lub włączyć opcję szutru.")
+        if (startCandidates.isEmpty() || endCandidates.isEmpty()) {
+            throw IOException("Nie udało się zlokalizować najbliższej drogi dla wskazanego obszaru.")
+        }
+
+        onProgress("🔍 Wyznaczanie optymalnej ścieżki A* po drogach bocznych...")
+
+        var bestPathResult: AStarResult? = null
+        for (sId in startCandidates) {
+            for (eId in endCandidates) {
+                val path = AStarRouter.findPath(graph, sId, eId)
+                if (path != null) {
+                    bestPathResult = path
+                    break
+                }
+            }
+            if (bestPathResult != null) break
+        }
+
+        val pathResult = bestPathResult
+            ?: throw IOException("Nie udało się połączyć punktów trasy po przejezdnych drogach bocznych. Spróbuj zmienić punkty lub włączyć opcję szutru.")
+
+        val t2 = System.currentTimeMillis()
+        val ramAfter = (runtime.totalMemory() - runtime.freeMemory()) / (1024.0 * 1024.0)
 
         val fullRoadPoints = listOf(start) + pathResult.pathPoints + listOf(end)
+        val totalTime = t2 - t0
+        val fetchTime = t1 - t0
+        val routerTime = t2 - t1
+
+        val totalEdges = graph.adjacency.values.sumOf { it.size }
+        val graphMemMb = (graph.nodes.size * 64.0 + totalEdges * 48.0) / (1024.0 * 1024.0)
+        val heapDeltaMb = max(0.1, ramAfter - ramBefore)
+        val ramUsed = if (heapDeltaMb > 50.0) graphMemMb else heapDeltaMb
+
+        onProgress("✅ Sukces! Wyznaczono trasę w %.2f s.".format(totalTime / 1000.0))
 
         return RouteCandidate(
             start = start,
@@ -52,7 +91,13 @@ object RouteCandidateGenerator {
             roadPoints = fullRoadPoints,
             preferences = preferences,
             estimatedDistanceKm = pathResult.totalDistanceKm,
-            trackPointCount = fullRoadPoints.size
+            trackPointCount = fullRoadPoints.size,
+            fromCache = overpassData.fromCache,
+            executionTimeMs = totalTime,
+            fetchTimeMs = fetchTime,
+            routerTimeMs = routerTime,
+            payloadSizeBytes = overpassData.payloadSizeBytes,
+            ramUsedMb = ramUsed
         )
     }
 }

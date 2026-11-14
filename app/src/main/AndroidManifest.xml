@@ -6,6 +6,15 @@
         <package android:name="net.osmand" />
         <package android:name="net.osmand.plus" />
         <package android:name="net.osmand.dev" />
+        <package android:name="cz.seznam.mapy" />
+        <package android:name="de.kurviger.k3" />
+        <package android:name="de.kurviger.app" />
+        <package android:name="com.calimoto.calimoto" />
+        <package android:name="com.royalenfield.riderapp" />
+        <package android:name="com.tomtom.gns.androidapp" />
+        <package android:name="com.garmin.android.apps.explore" />
+        <package android:name="menion.android.locus" />
+        <package android:name="se.detecht.android" />
     </queries>
 
     <application

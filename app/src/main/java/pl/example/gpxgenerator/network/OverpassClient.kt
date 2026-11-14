@@ -1,5 +1,6 @@
 package pl.example.gpxgenerator.network
 
+import android.content.Context
 import android.util.JsonReader
 import okhttp3.FormBody
 import okhttp3.OkHttpClient
@@ -21,16 +22,18 @@ data class OsmWay(
 
 data class OverpassResponseData(
     val nodes: Map<Long, GeoPoint>,
-    val ways: List<OsmWay>
+    val ways: List<OsmWay>,
+    val fromCache: Boolean = false,
+    val payloadSizeBytes: Long = 0L
 )
 
 object OverpassClient {
 
     private val ENDPOINTS = listOf(
         "https://overpass-api.de/api/interpreter",
-        "https://z.overpass-api.de/api/interpreter",
         "https://overpass.kumi.systems/api/interpreter",
-        "https://overpass.private.coffee/api/interpreter"
+        "https://overpass.private.coffee/api/interpreter",
+        "https://z.overpass-api.de/api/interpreter"
     )
 
     private val client = OkHttpClient.Builder()
@@ -38,22 +41,41 @@ object OverpassClient {
         .readTimeout(45, TimeUnit.SECONDS)
         .build()
 
-    fun fetchRoadsInBoundingBox(start: GeoPoint, end: GeoPoint): OverpassResponseData {
+    fun fetchRoadsInBoundingBox(
+        context: Context,
+        start: GeoPoint,
+        end: GeoPoint,
+        onProgress: (String) -> Unit = {}
+    ): OverpassResponseData {
         val latSpan = abs(start.latitude - end.latitude)
         val lonSpan = abs(start.longitude - end.longitude)
 
-        val latMargin = min(0.06, max(0.025, latSpan * 0.10))
-        val lonMargin = min(0.06, max(0.025, lonSpan * 0.10))
+        val latMargin = max(0.05, latSpan * 0.20)
+        val lonMargin = max(0.05, lonSpan * 0.20)
 
         val minLat = min(start.latitude, end.latitude) - latMargin
         val maxLat = max(start.latitude, end.latitude) + latMargin
         val minLon = min(start.longitude, end.longitude) - lonMargin
         val maxLon = max(start.longitude, end.longitude) + lonMargin
 
+        // 1. Sprawdzenie lokalnej pamięci podręcznej (Cache)
+        onProgress("⏳ Sprawdzanie lokalnej pamięci podręcznej (Cache)...")
+        val cached = OverpassCacheManager.getCachedData(context, minLat, minLon, maxLat, maxLon)
+        if (cached != null) {
+            onProgress("⚡ Odczytano siatkę dróg z lokalnego Cache!")
+            return OverpassResponseData(
+                nodes = cached.data.nodes,
+                ways = cached.data.ways,
+                fromCache = true,
+                payloadSizeBytes = 0L
+            )
+        }
+
+        // 2. Zapytanie Overpass API
         val query = """
             [out:json][timeout:45];
             (
-              way["highway"~"secondary|secondary_link|tertiary|tertiary_link|unclassified|residential|track|living_street"]($minLat,$minLon,$maxLat,$maxLon);
+              way["highway"~"motorway|motorway_link|trunk|trunk_link|primary|primary_link|secondary|secondary_link|tertiary|tertiary_link|unclassified|residential|track|service|living_street"]($minLat,$minLon,$maxLat,$maxLon);
             );
             out body;
             >;
@@ -62,7 +84,10 @@ object OverpassClient {
 
         val errors = mutableListOf<String>()
 
-        for (endpoint in ENDPOINTS) {
+        ENDPOINTS.forEachIndexed { idx, endpoint ->
+            val hostName = endpoint.removePrefix("https://").removeSuffix("/api/interpreter")
+            onProgress("⏳ [Próba ${idx + 1}/${ENDPOINTS.size}] Łączenie z serwerem Overpass ($hostName)...")
+
             try {
                 val formBody = FormBody.Builder()
                     .add("data", query)
@@ -76,15 +101,29 @@ object OverpassClient {
 
                 client.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) {
-                        throw IOException("HTTP ${response.code} z $endpoint: ${response.message}")
+                        throw IOException("HTTP ${response.code} z $hostName: ${response.message}")
                     }
-                    val bodyReader = response.body?.charStream()
+
+                    onProgress("📥 Pobrano odpowiedź z $hostName. Parsowanie strumienia dróg...")
+
+                    val charStream = response.body?.charStream()
                         ?: throw IOException("Pusta odpowiedź z Overpass API")
 
-                    return parseOverpassStream(bodyReader)
+                    val dataFromNet = parseOverpassStream(charStream)
+
+                    if (dataFromNet.ways.isNotEmpty()) {
+                        OverpassCacheManager.saveToCache(context, dataFromNet, minLat, minLon, maxLat, maxLon)
+                    }
+
+                    return dataFromNet
                 }
             } catch (e: Exception) {
-                errors.add("$endpoint: ${e.message}")
+                val errText = "$hostName: ${e.message}"
+                errors.add(errText)
+                if (idx < ENDPOINTS.size - 1) {
+                    onProgress("⚠️ Błąd/Timeout z $hostName (${e.message}). Przełączanie na kolejny serwer...")
+                    runCatching { Thread.sleep(500) }
+                }
             }
         }
 
@@ -97,6 +136,7 @@ object OverpassClient {
         val referencedNodeIds = HashSet<Long>(20000)
 
         JsonReader(charReader).use { reader ->
+            reader.isLenient = true
             reader.beginObject()
             while (reader.hasNext()) {
                 val topName = reader.nextName()
@@ -171,7 +211,7 @@ object OverpassClient {
             }
         }
 
-        return OverpassResponseData(activeNodes, ways)
+        return OverpassResponseData(activeNodes, ways, fromCache = false)
     }
 
     private fun abs(value: Double) = kotlin.math.abs(value)
