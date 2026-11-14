@@ -33,12 +33,13 @@ object OverpassClient {
         "https://overpass-api.de/api/interpreter",
         "https://overpass.kumi.systems/api/interpreter",
         "https://overpass.private.coffee/api/interpreter",
-        "https://z.overpass-api.de/api/interpreter"
+        "https://z.overpass-api.de/api/interpreter",
+        "https://lz4.overpass-api.de/api/interpreter"
     )
 
     private val client = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(45, TimeUnit.SECONDS)
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(25, TimeUnit.SECONDS)
         .build()
 
     fun fetchRoadsInBoundingBox(
@@ -50,8 +51,13 @@ object OverpassClient {
         val latSpan = abs(start.latitude - end.latitude)
         val lonSpan = abs(start.longitude - end.longitude)
 
-        val latMargin = max(0.05, latSpan * 0.20)
-        val lonMargin = max(0.05, lonSpan * 0.20)
+        // Dynamiczne skalowanie korytarza w zależności od długości trasy
+        val maxSpan = max(latSpan, lonSpan)
+        val (latMargin, lonMargin) = when {
+            maxSpan < 0.15 -> Pair(0.025, 0.025)
+            maxSpan < 0.60 -> Pair(0.035, 0.035)
+            else -> Pair(max(0.04, latSpan * 0.10), max(0.04, lonSpan * 0.10))
+        }
 
         val minLat = min(start.latitude, end.latitude) - latMargin
         val maxLat = max(start.latitude, end.latitude) + latMargin
@@ -71,11 +77,11 @@ object OverpassClient {
             )
         }
 
-        // 2. Zapytanie Overpass API
+        // 2. Standardowe, akceptowane zapytanie Overpass QL
         val query = """
-            [out:json][timeout:45];
+            [out:json][timeout:25];
             (
-              way["highway"~"motorway|motorway_link|trunk|trunk_link|primary|primary_link|secondary|secondary_link|tertiary|tertiary_link|unclassified|residential|track|service|living_street"]($minLat,$minLon,$maxLat,$maxLon);
+              way["highway"~"secondary|secondary_link|tertiary|tertiary_link|unclassified|residential|track|living_street|primary|primary_link|trunk|trunk_link|motorway|motorway_link|service"]($minLat,$minLon,$maxLat,$maxLon);
             );
             out body;
             >;
@@ -97,32 +103,30 @@ object OverpassClient {
                     .url(endpoint)
                     .post(formBody)
                     .header("User-Agent", "GPXGeneratorAndroid/1.0")
+                    .header("Accept", "application/json, */*")
+                    .header("Connection", "close")
                     .build()
 
                 client.newCall(request).execute().use { response ->
-                    if (!response.isSuccessful) {
+                    if (response.isSuccessful) {
+                        onProgress("📥 Pobrano odpowiedź z $hostName. Parsowanie strumienia dróg...")
+                        val charStream = response.body?.charStream()
+                            ?: throw IOException("Pusta odpowiedź z Overpass API")
+                        val dataFromNet = parseOverpassStream(charStream)
+                        if (dataFromNet.ways.isNotEmpty()) {
+                            OverpassCacheManager.saveToCache(context, dataFromNet, minLat, minLon, maxLat, maxLon)
+                            return dataFromNet
+                        }
+                    } else {
                         throw IOException("HTTP ${response.code} z $hostName: ${response.message}")
                     }
-
-                    onProgress("📥 Pobrano odpowiedź z $hostName. Parsowanie strumienia dróg...")
-
-                    val charStream = response.body?.charStream()
-                        ?: throw IOException("Pusta odpowiedź z Overpass API")
-
-                    val dataFromNet = parseOverpassStream(charStream)
-
-                    if (dataFromNet.ways.isNotEmpty()) {
-                        OverpassCacheManager.saveToCache(context, dataFromNet, minLat, minLon, maxLat, maxLon)
-                    }
-
-                    return dataFromNet
                 }
             } catch (e: Exception) {
                 val errText = "$hostName: ${e.message}"
                 errors.add(errText)
                 if (idx < ENDPOINTS.size - 1) {
-                    onProgress("⚠️ Błąd/Timeout z $hostName (${e.message}). Przełączanie na kolejny serwer...")
-                    runCatching { Thread.sleep(500) }
+                    onProgress("⚠️ Błąd z $hostName (${e.message}). Przełączanie na kolejny serwer...")
+                    runCatching { Thread.sleep(200) }
                 }
             }
         }
