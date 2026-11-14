@@ -40,7 +40,7 @@ object RouteCandidateGenerator {
         val t1 = System.currentTimeMillis()
 
         if (overpassData.ways.isEmpty()) {
-            throw IOException("Nie znaleziono dróg w wskazanym obszarze. Sprawdź punkty startu i mety.")
+            throw IOException("Pusta siatka dróg z Overpass (Nodes: ${overpassData.nodes.size}, Ways: 0). Start: (${start.latitude}, ${start.longitude}), Meta: (${end.latitude}, ${end.longitude})")
         }
 
         onProgress("🏗️ Budowanie grafu dróg (${overpassData.nodes.size} węzłów, ${overpassData.ways.size} odcinków)...")
@@ -50,7 +50,7 @@ object RouteCandidateGenerator {
         val endCandidates = graph.findNearestNodeCandidates(end, 5)
 
         if (startCandidates.isEmpty() || endCandidates.isEmpty()) {
-            throw IOException("Nie udało się zlokalizować najbliższej drogi dla wskazanego obszaru.")
+            throw IOException("Brak kandydujących węzłów w grafie (Start: ${startCandidates.size}, Meta: ${endCandidates.size}). Sprawdź punkty na mapie.")
         }
 
         onProgress("🔍 Wyznaczanie optymalnej ścieżki A* po drogach bocznych...")
@@ -68,7 +68,7 @@ object RouteCandidateGenerator {
         }
 
         val pathResult = bestPathResult
-            ?: throw IOException("Nie udało się połączyć punktów trasy po przejezdnych drogach bocznych. Spróbuj zmienić punkty lub włączyć opcję szutru.")
+            ?: throw IOException("A* Router: brak połączenia w grafie po drogach bocznych. Spróbuj zmienić punkty lub włączyć opcję szutru.")
 
         val t2 = System.currentTimeMillis()
         val ramAfter = (runtime.totalMemory() - runtime.freeMemory()) / (1024.0 * 1024.0)
